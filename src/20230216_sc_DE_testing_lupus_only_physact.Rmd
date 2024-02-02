@@ -1,0 +1,905 @@
+---
+title: "DE testing 02/16/2023"
+output: html_notebook
+---
+
+Here I will analyze Jimmie Ye's annotated h5ad object of lupus patients. I will
+analyze the physical activity and stress level of the patients. I will control for age, sex and race.
+
+This file uses better graphic settings than 20221208_sc_DE_testing_lupus_only_physact.Rmd
+
+# Import packages
+
+```{r}
+wd <- "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus"
+setwd(paste0(wd,"/analysis"))
+subfolder <- "20230216_sc_DE_testing_lupus_only_physact"
+
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+# library(lme4) # for mixed effects model, don't need to load it explicitly
+# library(MAST)
+library(edgeR)
+# library(Seurat)
+# library(muscat)
+
+# library(SeuratData)
+library(SingleCellExperiment)
+library(zellkonverter)
+
+library(fgsea)
+# library(msigdbr)
+
+# Automatic annotation
+# library(SingleR)
+
+# Set number of cores for MAST
+# Using > 3 cores would take up too much RAM
+options("mc.cores"=3)
+
+# ggplot theme settings
+my.theme <- theme_classic() +
+  theme(
+    axis.ticks = element_line(color = "black"),
+    plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+    axis.text = element_text(size=12, color="black"),
+    text = element_text(size=12, family="Arial"),
+    plot.margin = unit(c(0,1,1,0), "cm")
+  )
+# extrafont::font_import() # for exporting Arial font with ggsave(pdf)
+# loadfonts()
+```
+
+# Import metadata
+
+```{r}
+# Import metadata
+metadata <- read.csv(
+  "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus/metadata/clues_t1_plust2t3PA_N-123_12.7.22.csv"
+)
+
+for (i in c("inactive_t1","inactive_t3","biologicalsex","race")) {
+  metadata[,i] <- as.factor(metadata[,i])
+}
+
+metadata$subjectid <- as.character(metadata$subjectid)
+
+rownames(metadata) <- metadata$subjectid
+```
+
+```{r}
+# Add updated steroid information
+steroid <- readxl::read_excel(
+  "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus/metadata/CLUES_steroids_baseline.xlsx"
+)
+steroid$subjectid <- as.character(steroid$subjectid)
+
+# Merge
+metadata <- merge(
+  metadata, steroid[,c("subjectid","steroral3mohigh")],
+  by="subjectid", all.x=TRUE, all.y=FALSE,
+  suffixes=c("",".new")
+)
+```
+
+```{r}
+# Missing old steroid info
+print(sum(is.na(metadata$steroral3mohigh)))
+
+# Missing new steroid info
+print(sum(is.na(metadata$steroral3mohigh.new)))
+```
+
+
+```{r}
+# GSEA pathways
+go.bp <- msigdbr::msigdbr(species = "Homo sapiens", category = "C5", subcategory = "GO:BP")
+go.bp.fgsea <- go.bp %>% split(x = .$gene_symbol, f = .$gs_name)
+
+hallmark <- msigdbr::msigdbr(species = "Homo sapiens", category = "H")
+hallmark.fgsea <- hallmark %>% split(x = .$gene_symbol, f = .$gs_name)
+hallmark.cp <- hallmark %>% select(gs_name, gene_symbol) # for clusterProfiler
+
+reactome <- msigdbr::msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME")
+reactome.fgsea <- reactome %>% split(x = .$gene_symbol, f = .$gs_name)
+reactome.cp <- reactome %>% select(gs_name, gene_symbol) # for clusterProfiler
+```
+
+# Pseudobulk DE testing: Effects of physical activity at T3
+
+## Covariates: age, sex, race
+
+```{r}
+inactive.up <- list()
+
+# Save cpm
+my.cpm <- list()
+
+for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC","cM","ncM","NK","pDC","Prolif","PB","Progen")
+  print(sprintf("DE test: %s",i))
+
+  # Import pseudobulk count
+  pseudobulk <- read.csv(paste0(wd, "/pseudobulk_counts/", 
+                                "Ye_lab_annotated_cellxgene_lupus_only_physact_",i,"_pseudobulk_count.csv"),
+                         row.names = 1, check.names = FALSE)
+  
+  # Reformat column names
+  colnames(pseudobulk) <- sapply(colnames(pseudobulk),
+                                 FUN = function(x) strsplit(x,"_")[[1]][1])
+  
+  # Get metadata of samples that are present in pseudobulk, and have a valid inactive_t3
+  metadata.temp <- metadata %>%
+    subset(!is.na(inactive_t3) & (subjectid %in% colnames(pseudobulk))) %>%
+    droplevels()
+  
+  # Filter pseudobulk
+  pseudobulk.temp <- pseudobulk[,metadata.temp$subjectid]
+  
+  # Keep genes with >=10 counts in >=20% of the samples
+  pseudobulk.temp <- pseudobulk.temp[rowSums(pseudobulk.temp>=10) >= 0.2*ncol(pseudobulk.temp), ]
+  
+  # Use edgeR LRT: https://doi.org/10.1038/s41467-021-25960-2
+  y <- DGEList(counts = pseudobulk.temp)
+  y <- calcNormFactors(y)
+  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race, metadata.temp)
+  y <- estimateDisp(y, design)
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef="inactive_t31")
+  # fit <- glmQLFit(y, design)
+  # qlf <- glmQLFTest(fit, contrast=my.contrast)
+  
+  my.cpm[[i]] <- edgeR::cpm(y, log = TRUE)
+
+  # # Plot histogram of P-value
+  # print(hist(lrt$table$PValue, main=i, xlab="PValue"))
+
+  # Cutoff FDR < 0.1
+  inactive.up[[i]] <- topTags(lrt, n=Inf, p.value=1, adjust.method="BH")$table
+  print(sprintf("Number of genes FDR < 0.1: %d", 
+                sum(inactive.up[[i]]$FDR < 0.1)))
+  
+  # remove(metadata.temp, pseudobulk.temp)
+}
+
+```
+
+Plot the number of DE genes
+
+```{r}
+nDE <- data.frame(matrix(NA, nrow=length(inactive.up), ncol=2))
+colnames(nDE) <- c("cell.type","n.genes")
+rownames(nDE) <- names(inactive.up)
+for (i in rownames(nDE)) {
+  nDE[i,"n.genes"] <- sum(inactive.up[[i]]$FDR < 0.1)
+  nDE[i,"cell.type"] <- i
+}
+# Remove pDC and cDC
+nDE <- nDE[!(nDE$cell.type %in% c("pDC","cDC")),]
+
+# Rename T4 to CD4+ T
+nDE[nDE$cell.type=="T4","cell.type"] <- "CD4+ T"
+nDE[nDE$cell.type=="T8","cell.type"] <- "CD8+ T"
+
+ggplot(data = nDE,
+       aes(x=reorder(cell.type, n.genes),
+           y=n.genes)) +
+  geom_col(width = 0.7,
+           fill = "gray50", color = "gray50") +
+  geom_text(aes(y=n.genes, label=n.genes), hjust = 0, nudge_y = 15) +
+  scale_y_continuous(limits = c(-15,800), expand = c(0,0),
+                     breaks = c(0,200,400,600,800)) +
+  labs(x = "Cell types", y = "Number of DE genes") +
+  coord_flip() +
+  my.theme
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/nDEgenes.svg", wd),
+  width = 3.7, height = 3, units = "in"
+)
+```
+
+Volcano plots
+
+```{r}
+p <- list()
+for (i in c("T4","T8")) {
+  # Identify direction
+  res.toplot <- inactive.up[[i]]
+  res.toplot$direction <- "Not significant"
+  res.toplot[res.toplot$FDR<0.1 & res.toplot$logFC>0,"direction"] <- "Upregulated in inactive patients"
+  res.toplot[res.toplot$FDR<0.1 & res.toplot$logFC<0,"direction"] <- "Downregulated in inactive patients"
+  res.toplot$direction <- factor(
+    res.toplot$direction,
+    levels=c("Upregulated in inactive patients","Downregulated in inactive patients","Not significant"))
+  
+  p[[i]] <- ggplot(data=res.toplot) +
+    geom_point(aes(x=logFC, y=-log10(FDR), color=direction), size=0.5) +
+    # geom_vline(xintercept=c(-0.5,0.5), linetype="dashed", color="black") +
+    scale_color_manual(values=c("#ef8a62","#67a9cf","gray65"), guide="none") +
+    scale_x_continuous(limits = c(-2,2)) +
+    scale_y_continuous(limits=c(-0.1,3), expand = c(0,0)) +
+    labs(x="log2(fold change)", y="-log10(FDR)",
+         title=sprintf("Differentially expressed\ngenes in %s cells",i)) +
+    theme_classic() +
+  theme(
+    axis.ticks = element_line(color = "black"),
+    plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+    axis.text = element_text(size=12, color="black"),
+    text = element_text(size=12, family="Arial"),
+    plot.margin = unit(c(0,1,0.6,0), "cm")
+  )
+}
+
+p[[1]]+p[[2]] + plot_layout(nrow=1)
+# ggsave(
+#   sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/volcano_plot_T4-T8.svg", wd),
+#   plot = p[[1]]+p[[2]] + plot_layout(ncol=1),
+#   width = 3, height = 6, units = "in"
+# )
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/volcano_plot_T4-T8.svg", wd),
+  plot = p[[1]]+p[[2]] + plot_layout(nrow=1),
+  width = 6, height = 3.4, units = "in"
+)
+```
+
+Check pseudobulk expression to verify the direction of up/down-regulation.
+
+```{r}
+print(inactive.up[[i]]["IRF2BP2",])
+boxplot(
+  my.cpm[["T4"]]["IRF2BP2",] ~ metadata[match(colnames(my.cpm[["T4"]]),metadata$subjectid),"inactive_t3"]
+)
+```
+
+Save DE results.
+
+```{r}
+for (i in c("T4","T8","B","cM")) {
+  write.csv(
+    subset(inactive.up[[i]], FDR < 0.1),
+    sprintf("%s/gene_list/%s/%s_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr0.1.csv", wd, subfolder, i)
+  )
+  
+  write.csv(
+    inactive.up[[i]],
+    sprintf("%s/gene_list/%s/%s_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0.csv", wd, subfolder, i)
+  )
+}
+```
+
+### GSEA
+
+fgsea
+
+```{r}
+# set.seed(0)
+# hallmark.gsea.res<- list()
+# for (i in c("T4","T8","B","NK","cM")) {
+#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
+#   names(gene.ranks) <- rownames(inactive.up[[i]])
+#   gene.ranks <- sort(gene.ranks)
+#   
+#   # GSEA: GO:BP
+#   hallmark.gsea.res[[i]] <- fgsea(
+#     pathways = hallmark.fgsea,
+#     stats = gene.ranks,
+#     minSize = 15,
+#     maxSize = 500
+#   )
+# }
+```
+
+clusterprofiler
+
+```{r}
+set.seed(0)
+
+# # Reactome
+# reactome.gsea.res <- list()
+# for (i in c("T4","T8")) {
+#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
+#   names(gene.ranks) <- rownames(inactive.up[[i]])
+#   gene.ranks <- sort(gene.ranks, decreasing = TRUE)
+#   
+#   temp <- clusterProfiler::GSEA(
+#     geneList = gene.ranks,
+#     TERM2GENE = reactome.cp,
+#     pvalueCutoff = 1, pAdjustMethod = "BH"
+#   )
+#   reactome.gsea.res[[i]] <- temp@result
+# }
+
+# Hallmark
+hallmark.gsea.res <- list() # store data frame
+hallmark.gseaResult <- list() # store gseaResult object
+for (i in c("T4","T8","cM","B")) {
+  gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
+  # gene.ranks <- inactive.up[[i]]$logFC
+  names(gene.ranks) <- rownames(inactive.up[[i]])
+  gene.ranks <- sort(gene.ranks, decreasing = TRUE)
+  
+  temp <- clusterProfiler::GSEA(
+    geneList = gene.ranks,
+    TERM2GENE = hallmark.cp,
+    pvalueCutoff = 1, pAdjustMethod = "BH"
+  )
+  hallmark.gsea.res[[i]] <- temp@result
+  hallmark.gseaResult[[i]] <- temp
+}
+```
+
+Save GSEA results
+
+```{r}
+for (i in names(hallmark.gsea.res)) {
+  # write.csv(
+  #   reactome.gsea.res[[i]],
+  #   sprintf("%s/gene_list/%s/%s_reactome-GSEA-clusterProfiler_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0.csv", wd, subfolder, i)
+  # )
+
+  write.csv(
+    hallmark.gsea.res[[i]],
+    sprintf("%s/gene_list/%s/%s_hallmark-GSEA-clusterProfiler_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0.csv", wd, subfolder, i)
+  )
+}
+```
+
+#### Plot significant Hallmark GSEA results
+
+```{r}
+# Combine T4 and T8 GSEA results
+merged.hallmark.gsea <- rbind(
+  hallmark.gsea.res[["T4"]] %>% mutate(cell.type="T4"), 
+  hallmark.gsea.res[["T8"]] %>% mutate(cell.type="T8")
+)
+
+# Get list of pathways that are significant in at least one analysis
+my.pathways <- union(
+  hallmark.gsea.res[["T4"]][hallmark.gsea.res[["T4"]]$p.adjust<0.1,]$ID,
+  hallmark.gsea.res[["T8"]][hallmark.gsea.res[["T8"]]$p.adjust<0.1,]$ID
+)
+# Filter for these overlapping pathways
+merged.hallmark.gsea <- merged.hallmark.gsea %>%
+  subset(ID %in% my.pathways)
+
+# Reformat pathway names
+merged.hallmark.gsea$ID <- gsub("^HALLMARK_","",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- gsub("_"," ",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- stringr::str_to_sentence(merged.hallmark.gsea$ID)
+# Fix capitalization of pathway names
+my.dict <- list("Tnfa"="TNFa", "nfkb"="NF-kB", "Il"="IL", "stat"="STAT",
+                "Kras"="KRAS", "Tgf"="TGF", "jak"="JAK", "Mtorc1"="mTORC1",
+                "Pi3k akt mtor"="PI3K AKT mTOR", "Myc"="MYC",
+                "Uv"="UV", "dn"="down", "G2m"="G2M")
+for (i in names(my.dict)) {
+  merged.hallmark.gsea$ID <- gsub(i, my.dict[[i]], merged.hallmark.gsea$ID)
+}
+
+p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(x) x[1]))) +
+  geom_point(aes(color=as.factor(NES>0)),
+             pch=1, size=2, stroke=1) +
+  geom_point(data=. %>% subset(p.adjust<0.1), 
+             aes(color=as.factor(NES>0)),
+             pch=16, size=2, stroke=1) +
+  geom_vline(xintercept=0, color="black") +
+  # scale_color_manual(values=c("TRUE"=rgb(0,0,0,1), "FALSE"=rgb(0,0,0,0))) +
+  scale_color_manual(values=c("TRUE"="#ef8a62","FALSE"="#67a9cf")) +
+  scale_x_continuous(limits=c(-3,3), expand=c(0,0)) +
+  labs(x = "GSEA normalized\nenrichment score", y = "",
+       title = "Pathways associated with\nphysical inactivity") +
+  facet_wrap(~ cell.type) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+    axis.text = element_text(size=11, color="black"),
+    text = element_text(size=12, family="Arial"),
+    plot.margin = unit(c(0,1,1,0), "cm"),
+    panel.spacing = unit(1, "lines"),
+    legend.key = element_rect(fill = "gray90"),
+    panel.grid.minor=element_blank()
+  )
+
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_T4-T8.svg", wd),
+  plot = p,
+  width = 7.2, height = 6, units = "in"
+)
+```
+
+Plot the same pathways for cM and B cells
+
+```{r}
+# Combine cM and B GSEA results
+merged.hallmark.gsea <- rbind(
+  hallmark.gsea.res[["cM"]] %>% mutate(cell.type="cM"), 
+  hallmark.gsea.res[["B"]] %>% mutate(cell.type="B")
+)
+# merged.hallmark.gsea$cell.type <- factor(
+#   merged.hallmark.gsea$cell.type,
+#   levels=c("cM","B"))
+
+# Filter for these overlapping pathways
+merged.hallmark.gsea <- merged.hallmark.gsea %>%
+  subset(ID %in% my.pathways)
+
+# Reformat pathway names
+merged.hallmark.gsea$ID <- gsub("^HALLMARK_","",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- gsub("_"," ",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- stringr::str_to_sentence(merged.hallmark.gsea$ID)
+# Fix capitalization of pathway names
+my.dict <- list("Tnfa"="TNFa", "nfkb"="NF-kB", "Il"="IL", "stat"="STAT",
+                "Kras"="KRAS", "Tgf"="TGF", "jak"="JAK", "Mtorc1"="mTORC1",
+                "Pi3k akt mtor"="PI3K AKT mTOR", "Myc"="MYC",
+                "Uv"="UV", "dn"="down", "G2m"="G2M")
+for (i in names(my.dict)) {
+  merged.hallmark.gsea$ID <- gsub(i, my.dict[[i]], merged.hallmark.gsea$ID)
+}
+
+p <- list()
+for (i in c("cM","B")) {
+  p[[i]] <- ggplot(data=merged.hallmark.gsea %>% subset(cell.type==i),
+              aes(x=NES, y=reorder(ID, NES))) +
+    geom_point(aes(color=as.factor(NES>0)),
+               pch=1, size=2, stroke=1) +
+    geom_point(data=. %>% subset(p.adjust<0.1), 
+               aes(color=as.factor(NES>0)),
+               pch=16, size=2, stroke=1) +
+    geom_vline(xintercept=0, color="black") +
+    # scale_color_manual(values=c("TRUE"=rgb(0,0,0,1), "FALSE"=rgb(0,0,0,0))) +
+    scale_color_manual(values=c("TRUE"="#ef8a62","FALSE"="#67a9cf"), guide="none") +
+    scale_x_continuous(limits=c(-3,3), expand=c(0,0)) +
+    labs(x = "GSEA normalized\nenrichment score", y = "",
+         title = sprintf("Pathways associated with\nphysical inactivity\nin %s cells", i)) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+      axis.text = element_text(size=11, color="black"),
+      text = element_text(size=12, family="Arial"),
+      plot.margin = unit(c(0,1,1,0), "cm"),
+      panel.spacing = unit(1, "lines"),
+      legend.key = element_rect(fill = "gray90"),
+      panel.grid.minor=element_blank()
+    )
+}
+p[[1]]+p[[2]] + plot_layout(nrow=1)
+
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_cM-B.svg", wd),
+  plot = p[[1]]+p[[2]] + plot_layout(nrow=1),
+  width = 9, height = 6.7, units = "in"
+)
+```
+
+#### Plot network
+
+```{r}
+# Extract certain pathways only
+my.pathways <- c(
+  "HALLMARK_INTERFERON_GAMMA_RESPONSE","HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+  "HALLMARK_IL2_STAT5_SIGNALING","HALLMARK_IL6_JAK_STAT3_SIGNALING")
+
+# Fold change
+gene.FC <- inactive.up[["T4"]]$logFC
+names(gene.FC) <- rownames(inactive.up[["T4"]])
+
+# Gene-concept network
+p1 <- enrichplot::cnetplot(
+  hallmark.gseaResult[["T4"]],
+  showCategory = my.pathways,
+  node_label="all",
+  foldChange = gene.FC,
+  cex_label_gene = 0.6, cex_label_category = 0.9) +
+  scale_colour_gradient2(low="#67a9cf", high="#ef8a62", midpoint = 0)
+p2 <- enrichplot::cnetplot(
+  hallmark.gseaResult[["T4"]],
+  showCategory = my.pathways,
+  node_label="category",
+  foldChange = gene.FC,
+  cex_label_gene = 0.6, cex_label_category = 0.6) +
+  scale_colour_gradient2(low="#67a9cf", high="#ef8a62", midpoint = 0)
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_cnetplot_T4.svg", wd),
+  plot = p2,
+  width = 10, height = 6.5, units = "in"
+)
+
+# Enrichment map
+# enrichplot::emapplot(enrichplot::pairwise_termsim(hallmark.gseaResult[["T4"]]))
+```
+
+## Covariates: age, sex, race, physfunt
+
+```{r}
+inactive.up <- list()
+
+for (i in c("T4","T8","B","cDC","cM","ncM","NK")) { # c("T4","T8","B","cDC","cM","ncM","NK","pDC","Prolif","PB","Progen")
+  print(paste("DE test:",i))
+
+  # Import pseudobulk count
+  pseudobulk <- read.csv(paste0(wd, "/pseudobulk_counts/", 
+                                "Ye_lab_annotated_cellxgene_lupus_only_physact_",i,"_pseudobulk_count.csv"),
+                         row.names = 1, check.names = FALSE)
+  
+  # Reformat column names
+  colnames(pseudobulk) <- unlist(lapply(colnames(pseudobulk),
+                                        FUN = function(x) strsplit(x,"_")[[1]][1]))
+  
+  # Get metadata of samples that are present in pseudobulk, and have a valid inactive_t3
+  metadata.temp <- metadata %>%
+    subset(!is.na(inactive_t3) & (subjectid %in% colnames(pseudobulk))) %>%
+    droplevels()
+  
+  # Filter pseudobulk
+  pseudobulk.temp <- pseudobulk[,metadata.temp$subjectid]
+  
+  # Keep genes with >=10 counts in >=20% of the samples
+  pseudobulk.temp <- pseudobulk.temp[rowSums(pseudobulk.temp>=10) >= 0.2*ncol(pseudobulk.temp), ]
+  
+  # Used edgeR LRT: https://doi.org/10.1038/s41467-021-25960-2
+  y <- DGEList(counts = pseudobulk.temp)
+  y <- calcNormFactors(y)
+  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race + physfunt, metadata.temp)
+  y <- estimateDisp(y, design)
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef="inactive_t31")
+  # fit <- glmQLFit(y, design)
+  # qlf <- glmQLFTest(fit, contrast=my.contrast)
+
+  # # Plot histogram of P-value
+  # print(hist(lrt$table$PValue, main=i, xlab="PValue"))
+
+  # Cutoff FDR < 0.1
+  inactive.up[[i]] <- topTags(lrt, n=Inf, p.value=1, adjust.method="BH")$table
+  print(sprintf("Number of genes FDR < 0.1: %d", 
+                sum(inactive.up[[i]]$FDR < 0.1)))
+  
+  # remove(metadata.temp, pseudobulk.temp)
+}
+
+```
+
+Save DE results
+
+```{r}
+for (i in c("T4","T8")) {
+  write.csv(
+    inactive.up[[i]],
+    sprintf("%s/gene_list/%s/%s_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-physfunt-covariate_fdr1.0.csv", wd, subfolder, i)
+  )
+}
+```
+
+### GSEA
+
+```{r}
+# hallmark.gsea.res<- list()
+# for (i in c("T4","T8","B","NK","cM")) {
+#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
+#   names(gene.ranks) <- rownames(inactive.up[[i]])
+#   gene.ranks <- sort(gene.ranks)
+#   
+#   # GSEA: GO:BP
+#   hallmark.gsea.res[[i]] <- fgsea(
+#     pathways = hallmark.fgsea,
+#     stats = gene.ranks,
+#     minSize = 15,
+#     maxSize = 500
+#   )
+# }
+```
+
+```{r}
+set.seed(0)
+
+# Hallmark
+hallmark.gsea.res <- list() # store data frame
+hallmark.gseaResult <- list() # store gseaResult object
+for (i in c("T4","T8","cM","B")) {
+  gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
+  # gene.ranks <- inactive.up[[i]]$logFC
+  names(gene.ranks) <- rownames(inactive.up[[i]])
+  gene.ranks <- sort(gene.ranks, decreasing = TRUE)
+  
+  temp <- clusterProfiler::GSEA(
+    geneList = gene.ranks,
+    TERM2GENE = hallmark.cp,
+    pvalueCutoff = 1, pAdjustMethod = "BH"
+  )
+  hallmark.gsea.res[[i]] <- temp@result
+  hallmark.gseaResult[[i]] <- temp
+}
+
+```
+
+Save GSEA results
+
+```{r}
+for (i in names(hallmark.gsea.res)) {
+  write.csv(
+    hallmark.gsea.res[[i]],
+    sprintf("%s/gene_list/%s/%s_hallmark-GSEA-clusterProfiler_inactive-t3-up_age-biologicalsex-race-physfunt-covariate_fdr1.0.csv", wd, subfolder, i)
+  )
+}
+```
+
+Plot merged GSEA results
+
+```{r}
+merged.hallmark.gsea <- rbind(
+  hallmark.gsea.res[["T4"]] %>% mutate(cell.type="T4"), 
+  hallmark.gsea.res[["T8"]] %>% mutate(cell.type="T8")
+)
+
+# Get list of pathways that are significant in at least one analysis
+my.pathways <- union(
+  hallmark.gsea.res[["T4"]][hallmark.gsea.res[["T4"]]$padj<0.1,]$pathway,
+  hallmark.gsea.res[["T8"]][hallmark.gsea.res[["T8"]]$padj<0.1,]$pathway
+)
+# Filter for these overlapping pathways
+merged.hallmark.gsea <- merged.hallmark.gsea %>%
+  subset(pathway %in% my.pathways)
+
+ggplot(data=merged.hallmark.gsea) +
+  geom_point(mapping=aes(x=reorder(gsub("^HALLMARK_","",pathway),NES), y=NES, fill=as.factor(NES>0),
+                         colour=as.factor(p.adjust < 0.1)),
+             pch=21, size=2, stroke=1) +
+  geom_hline(yintercept=0, color="black") +
+  scale_color_manual(values=c("white","black")) +
+  scale_y_continuous(breaks=seq(-4,4,2), limits=c(-3,3)) +
+  labs(x="Hallmark pathways", y="NES", 
+       title="Pathways upregulated in\ninactive patients") +
+  coord_flip() + facet_wrap(~ cell.type) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+    axis.text = element_text(size=12, color="black"),
+    text = element_text(size=12, family="Arial"),
+    plot.margin = unit(c(0,1,1,0), "cm"),
+    panel.spacing = unit(1, "lines"),
+    legend.key = element_rect(fill = "gray90")
+  )
+
+ggsave(
+  paste0(wd,"figures/",subfolder,"/physfunt_GSEA_T4_T8.svg"),
+  width = 10, height=7, units="in"
+)
+# ggsave(
+#   paste0(wd,"figures/",subfolder,"/GSEA_T4_T8.png"),
+#   width = 10, height=7, units="in"
+# )
+```
+
+## Covariates: age, sex, race (patients with steroid info only)
+
+```{r}
+inactive.up <- list()
+
+# Save cpm
+my.cpm <- list()
+
+for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC","cM","ncM","NK","pDC","Prolif","PB","Progen")
+  print(sprintf("DE test: %s",i))
+
+  # Import pseudobulk count
+  pseudobulk <- read.csv(paste0(wd, "/pseudobulk_counts/", 
+                                "Ye_lab_annotated_cellxgene_lupus_only_physact_",i,"_pseudobulk_count.csv"),
+                         row.names = 1, check.names = FALSE)
+  
+  # Reformat column names
+  colnames(pseudobulk) <- sapply(colnames(pseudobulk),
+                                 FUN = function(x) strsplit(x,"_")[[1]][1])
+  
+  # Get metadata of samples that are present in pseudobulk, and have a valid inactive_t3 and valid steroral3mohigh
+  metadata.temp <- metadata %>%
+    subset(!is.na(inactive_t3) & (subjectid %in% colnames(pseudobulk)) &
+             !is.na(steroral3mohigh.new)) %>%
+    droplevels()
+  
+  # Filter pseudobulk
+  pseudobulk.temp <- pseudobulk[,metadata.temp$subjectid]
+  
+  # Keep genes with >=10 counts in >=20% of the samples
+  pseudobulk.temp <- pseudobulk.temp[rowSums(pseudobulk.temp>=10) >= 0.2*ncol(pseudobulk.temp), ]
+  
+  # Use edgeR LRT: https://doi.org/10.1038/s41467-021-25960-2
+  y <- DGEList(counts = pseudobulk.temp)
+  y <- calcNormFactors(y)
+  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race, metadata.temp)
+  y <- estimateDisp(y, design)
+  fit <- glmFit(y, design)
+  lrt <- glmLRT(fit, coef="inactive_t31")
+  # fit <- glmQLFit(y, design)
+  # qlf <- glmQLFTest(fit, contrast=my.contrast)
+  
+  my.cpm[[i]] <- edgeR::cpm(y, log = TRUE)
+
+  # # Plot histogram of P-value
+  # print(hist(lrt$table$PValue, main=i, xlab="PValue"))
+
+  # Cutoff FDR < 0.1
+  inactive.up[[i]] <- topTags(lrt, n=Inf, p.value=1, adjust.method="BH")$table
+  print(sprintf("Number of genes FDR < 0.1: %d", 
+                sum(inactive.up[[i]]$FDR < 0.1)))
+  
+  # remove(metadata.temp, pseudobulk.temp)
+}
+
+```
+
+### GSEA
+
+clusterprofiler
+
+```{r}
+set.seed(0)
+
+# # Reactome
+# reactome.gsea.res <- list()
+# for (i in c("T4","T8")) {
+#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
+#   names(gene.ranks) <- rownames(inactive.up[[i]])
+#   gene.ranks <- sort(gene.ranks, decreasing = TRUE)
+#   
+#   temp <- clusterProfiler::GSEA(
+#     geneList = gene.ranks,
+#     TERM2GENE = reactome.cp,
+#     pvalueCutoff = 1, pAdjustMethod = "BH"
+#   )
+#   reactome.gsea.res[[i]] <- temp@result
+# }
+
+# Hallmark
+hallmark.gsea.res <- list() # store data frame
+hallmark.gseaResult <- list() # store gseaResult object
+for (i in c("T4","T8","cM","B")) {
+  gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
+  # gene.ranks <- inactive.up[[i]]$logFC
+  names(gene.ranks) <- rownames(inactive.up[[i]])
+  gene.ranks <- sort(gene.ranks, decreasing = TRUE)
+  
+  temp <- clusterProfiler::GSEA(
+    geneList = gene.ranks,
+    TERM2GENE = hallmark.cp,
+    pvalueCutoff = 1, pAdjustMethod = "BH"
+  )
+  hallmark.gsea.res[[i]] <- temp@result
+  hallmark.gseaResult[[i]] <- temp
+}
+```
+
+#### Plot significant Hallmark GSEA results
+
+```{r}
+# Combine T4 and T8 GSEA results
+merged.hallmark.gsea <- rbind(
+  hallmark.gsea.res[["T4"]] %>% mutate(cell.type="T4"), 
+  hallmark.gsea.res[["T8"]] %>% mutate(cell.type="T8")
+)
+
+# Get list of pathways that are significant in at least one analysis
+my.pathways <- union(
+  hallmark.gsea.res[["T4"]][hallmark.gsea.res[["T4"]]$p.adjust<0.1,]$ID,
+  hallmark.gsea.res[["T8"]][hallmark.gsea.res[["T8"]]$p.adjust<0.1,]$ID
+)
+# Filter for these overlapping pathways
+merged.hallmark.gsea <- merged.hallmark.gsea %>%
+  subset(ID %in% my.pathways)
+
+# Reformat pathway names
+merged.hallmark.gsea$ID <- gsub("^HALLMARK_","",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- gsub("_"," ",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- stringr::str_to_sentence(merged.hallmark.gsea$ID)
+# Fix capitalization of pathway names
+my.dict <- list("Tnfa"="TNFa", "nfkb"="NF-kB", "Il"="IL", "stat"="STAT",
+                "Kras"="KRAS", "Tgf"="TGF", "jak"="JAK", "Mtorc1"="mTORC1",
+                "Pi3k akt mtor"="PI3K AKT mTOR", "Myc"="MYC",
+                "Uv"="UV", "dn"="down", "G2m"="G2M")
+for (i in names(my.dict)) {
+  merged.hallmark.gsea$ID <- gsub(i, my.dict[[i]], merged.hallmark.gsea$ID)
+}
+
+p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(x) x[1]))) +
+  geom_point(aes(color=as.factor(NES>0)),
+             pch=1, size=2, stroke=1) +
+  geom_point(data=. %>% subset(p.adjust<0.1), 
+             aes(color=as.factor(NES>0)),
+             pch=16, size=2, stroke=1) +
+  geom_vline(xintercept=0, color="black") +
+  # scale_color_manual(values=c("TRUE"=rgb(0,0,0,1), "FALSE"=rgb(0,0,0,0))) +
+  scale_color_manual(values=c("TRUE"="#ef8a62","FALSE"="#67a9cf")) +
+  scale_x_continuous(limits=c(-3,3), expand=c(0,0)) +
+  labs(x = "GSEA normalized\nenrichment score", y = "",
+       title = "Pathways associated with\nphysical inactivity") +
+  facet_wrap(~ cell.type) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+    axis.text = element_text(size=11, color="black"),
+    text = element_text(size=12, family="Arial"),
+    plot.margin = unit(c(0,1,1,0), "cm"),
+    panel.spacing = unit(1, "lines"),
+    legend.key = element_rect(fill = "gray90"),
+    panel.grid.minor=element_blank()
+  )
+
+# ggsave(
+#   sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_T4-T8.svg", wd),
+#   plot = p,
+#   width = 7.2, height = 6, units = "in"
+# )
+```
+
+# IPA
+
+Plot IPA upstream analysis results. I will use the IPA results from 20221208_sc_DE_testing_lupus_only_physact, because the DE analysis is the same as this script.
+
+```{r}
+# T4
+ipa.T4 <- readxl::read_excel(
+ "T4_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0_cytokine-z2.0-fdr0.1.xls",
+ skip = 1
+)
+# Reformat column names
+colnames(ipa.T4) <- gsub(" |-", ".", colnames(ipa.T4))
+# Remove bias rows
+ipa.T4 <- subset(ipa.T4, is.na(Flags))
+
+ggplot(data = ipa.T4, aes(x=reorder(Upstream.Regulator, Activation.z.score), 
+                       y=Activation.z.score)) +
+  geom_col(width = 0.7, fill = "#ef8a62", color = "#ef8a62") +
+  scale_y_continuous(limits = c(-0.2,6), expand = c(0,0),
+                     breaks = c(0,2,4,6)) +
+  labs(y = "Activation z-score",
+       x = "Cytokine",
+       title = "Upstream analysis of CD4+\nT cells of inactive patients") +
+  coord_flip() +
+  theme_classic() +
+  theme(
+    axis.ticks = element_line(color = "black"),
+    plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+    axis.text = element_text(size=11, color="black"),
+    text = element_text(size=12, family="Arial"),
+    plot.margin = unit(c(0,1,1,0), "cm")
+  )
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/T4_IPA-cytokine.svg", wd),
+  width = 2.7, height = 4, units = "in"
+)
+
+# T8
+ipa.T8 <- readxl::read_excel(
+ "T8_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0_cytokine-z2.0-fdr0.1.xls",
+ skip = 1
+)
+# Reformat column names
+colnames(ipa.T8) <- gsub(" |-", ".", colnames(ipa.T8))
+
+ggplot(data = ipa.T8, aes(x=reorder(Upstream.Regulator, Activation.z.score), 
+                       y=Activation.z.score)) +
+  geom_col(width = 0.7, fill = "#ef8a62", color = "#ef8a62") +
+  scale_y_continuous(limits = c(-0.2,6), expand = c(0,0),
+                     breaks = c(0,2,4,6)) +
+  labs(y = "Activation z-score",
+       x = "Cytokine",
+       title = "Upstream analysis of CD8+\nT cells of inactive patients") +
+  coord_flip() +
+  theme_classic() +
+  theme(
+    axis.ticks = element_line(color = "black"),
+    plot.title = element_text(hjust = 0.5, size=12, face="plain"),
+    axis.text = element_text(size=11, color="black"),
+    text = element_text(size=12, family="Arial"),
+    plot.margin = unit(c(0,1,1,0), "cm")
+  )
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/T8_IPA-cytokine.svg", wd),
+  width = 2.35, height = 1.6, units = "in"
+)
+```
+
+```{r}
+sessionInfo()
+```
+
