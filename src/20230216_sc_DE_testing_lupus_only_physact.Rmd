@@ -6,38 +6,22 @@ output: html_notebook
 Here I will analyze Jimmie Ye's annotated h5ad object of lupus patients. I will
 analyze the physical activity and stress level of the patients. I will control for age, sex and race.
 
-This file uses better graphic settings than 20221208_sc_DE_testing_lupus_only_physact.Rmd
-
 # Import packages
 
 ```{r}
 wd <- "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus"
-setwd(paste0(wd,"/analysis"))
 subfolder <- "20230216_sc_DE_testing_lupus_only_physact"
 
 library(dplyr)
 library(ggplot2)
 library(patchwork)
 
-# library(lme4) # for mixed effects model, don't need to load it explicitly
-# library(MAST)
 library(edgeR)
-# library(Seurat)
-# library(muscat)
 
-# library(SeuratData)
 library(SingleCellExperiment)
 library(zellkonverter)
 
-library(fgsea)
-# library(msigdbr)
-
-# Automatic annotation
-# library(SingleR)
-
-# Set number of cores for MAST
-# Using > 3 cores would take up too much RAM
-options("mc.cores"=3)
+# library(fgsea)
 
 # ggplot theme settings
 my.theme <- theme_classic() +
@@ -60,7 +44,7 @@ metadata <- read.csv(
   "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus/metadata/clues_t1_plust2t3PA_N-123_12.7.22.csv"
 )
 
-for (i in c("inactive_t1","inactive_t3","biologicalsex","race")) {
+for (i in c("inactive_t3","biologicalsex","race")) {
   metadata[,i] <- as.factor(metadata[,i])
 }
 
@@ -79,32 +63,21 @@ steroid$subjectid <- as.character(steroid$subjectid)
 # Merge
 metadata <- merge(
   metadata, steroid[,c("subjectid","steroral3mohigh")],
-  by="subjectid", all.x=TRUE, all.y=FALSE,
-  suffixes=c("",".new")
+  by="subjectid", all.x=TRUE, all.y=FALSE
 )
 ```
 
 ```{r}
-# Missing old steroid info
+# Missing the steroid info
 print(sum(is.na(metadata$steroral3mohigh)))
-
-# Missing new steroid info
-print(sum(is.na(metadata$steroral3mohigh.new)))
 ```
 
 
 ```{r}
 # GSEA pathways
-go.bp <- msigdbr::msigdbr(species = "Homo sapiens", category = "C5", subcategory = "GO:BP")
-go.bp.fgsea <- go.bp %>% split(x = .$gene_symbol, f = .$gs_name)
-
 hallmark <- msigdbr::msigdbr(species = "Homo sapiens", category = "H")
 hallmark.fgsea <- hallmark %>% split(x = .$gene_symbol, f = .$gs_name)
 hallmark.cp <- hallmark %>% select(gs_name, gene_symbol) # for clusterProfiler
-
-reactome <- msigdbr::msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME")
-reactome.fgsea <- reactome %>% split(x = .$gene_symbol, f = .$gs_name)
-reactome.cp <- reactome %>% select(gs_name, gene_symbol) # for clusterProfiler
 ```
 
 # Pseudobulk DE testing: Effects of physical activity at T3
@@ -147,13 +120,8 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   y <- estimateDisp(y, design)
   fit <- glmFit(y, design)
   lrt <- glmLRT(fit, coef="inactive_t31")
-  # fit <- glmQLFit(y, design)
-  # qlf <- glmQLFTest(fit, contrast=my.contrast)
   
   my.cpm[[i]] <- edgeR::cpm(y, log = TRUE)
-
-  # # Plot histogram of P-value
-  # print(hist(lrt$table$PValue, main=i, xlab="PValue"))
 
   # Cutoff FDR < 0.1
   inactive.up[[i]] <- topTags(lrt, n=Inf, p.value=1, adjust.method="BH")$table
@@ -544,11 +512,6 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK")) { # c("T4","T8","B","cDC","cM"
   y <- estimateDisp(y, design)
   fit <- glmFit(y, design)
   lrt <- glmLRT(fit, coef="inactive_t31")
-  # fit <- glmQLFit(y, design)
-  # qlf <- glmQLFTest(fit, contrast=my.contrast)
-
-  # # Plot histogram of P-value
-  # print(hist(lrt$table$PValue, main=i, xlab="PValue"))
 
   # Cutoff FDR < 0.1
   inactive.up[[i]] <- topTags(lrt, n=Inf, p.value=1, adjust.method="BH")$table
@@ -574,23 +537,6 @@ for (i in c("T4","T8")) {
 ### GSEA
 
 ```{r}
-# hallmark.gsea.res<- list()
-# for (i in c("T4","T8","B","NK","cM")) {
-#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
-#   names(gene.ranks) <- rownames(inactive.up[[i]])
-#   gene.ranks <- sort(gene.ranks)
-#   
-#   # GSEA: GO:BP
-#   hallmark.gsea.res[[i]] <- fgsea(
-#     pathways = hallmark.fgsea,
-#     stats = gene.ranks,
-#     minSize = 15,
-#     maxSize = 500
-#   )
-# }
-```
-
-```{r}
 set.seed(0)
 
 # Hallmark
@@ -598,7 +544,6 @@ hallmark.gsea.res <- list() # store data frame
 hallmark.gseaResult <- list() # store gseaResult object
 for (i in c("T4","T8","cM","B")) {
   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
-  # gene.ranks <- inactive.up[[i]]$logFC
   names(gene.ranks) <- rownames(inactive.up[[i]])
   gene.ranks <- sort(gene.ranks, decreasing = TRUE)
   
@@ -665,10 +610,6 @@ ggsave(
   paste0(wd,"figures/",subfolder,"/physfunt_GSEA_T4_T8.svg"),
   width = 10, height=7, units="in"
 )
-# ggsave(
-#   paste0(wd,"figures/",subfolder,"/GSEA_T4_T8.png"),
-#   width = 10, height=7, units="in"
-# )
 ```
 
 ## Covariates: age, sex, race (patients with steroid info only)
@@ -694,7 +635,7 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   # Get metadata of samples that are present in pseudobulk, and have a valid inactive_t3 and valid steroral3mohigh
   metadata.temp <- metadata %>%
     subset(!is.na(inactive_t3) & (subjectid %in% colnames(pseudobulk)) &
-             !is.na(steroral3mohigh.new)) %>%
+             !is.na(steroral3mohigh)) %>%
     droplevels()
   
   # Filter pseudobulk
@@ -710,13 +651,8 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   y <- estimateDisp(y, design)
   fit <- glmFit(y, design)
   lrt <- glmLRT(fit, coef="inactive_t31")
-  # fit <- glmQLFit(y, design)
-  # qlf <- glmQLFTest(fit, contrast=my.contrast)
   
   my.cpm[[i]] <- edgeR::cpm(y, log = TRUE)
-
-  # # Plot histogram of P-value
-  # print(hist(lrt$table$PValue, main=i, xlab="PValue"))
 
   # Cutoff FDR < 0.1
   inactive.up[[i]] <- topTags(lrt, n=Inf, p.value=1, adjust.method="BH")$table
@@ -734,21 +670,6 @@ clusterprofiler
 
 ```{r}
 set.seed(0)
-
-# # Reactome
-# reactome.gsea.res <- list()
-# for (i in c("T4","T8")) {
-#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
-#   names(gene.ranks) <- rownames(inactive.up[[i]])
-#   gene.ranks <- sort(gene.ranks, decreasing = TRUE)
-#   
-#   temp <- clusterProfiler::GSEA(
-#     geneList = gene.ranks,
-#     TERM2GENE = reactome.cp,
-#     pvalueCutoff = 1, pAdjustMethod = "BH"
-#   )
-#   reactome.gsea.res[[i]] <- temp@result
-# }
 
 # Hallmark
 hallmark.gsea.res <- list() # store data frame
@@ -823,12 +744,6 @@ p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(
     legend.key = element_rect(fill = "gray90"),
     panel.grid.minor=element_blank()
   )
-
-# ggsave(
-#   sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_T4-T8.svg", wd),
-#   plot = p,
-#   width = 7.2, height = 6, units = "in"
-# )
 ```
 
 # IPA
