@@ -444,7 +444,7 @@ ggsave(
 
 ```{r}
 # Extract certain pathways only
-my.pathways <- c(
+cnet.pathways <- c(
   "HALLMARK_INTERFERON_GAMMA_RESPONSE","HALLMARK_TNFA_SIGNALING_VIA_NFKB",
   "HALLMARK_IL2_STAT5_SIGNALING","HALLMARK_IL6_JAK_STAT3_SIGNALING")
 
@@ -455,14 +455,14 @@ names(gene.FC) <- rownames(inactive.up[["T4"]])
 # Gene-concept network
 p1 <- enrichplot::cnetplot(
   hallmark.gseaResult[["T4"]],
-  showCategory = my.pathways,
+  showCategory = cnet.pathways,
   node_label="all",
   foldChange = gene.FC,
   cex_label_gene = 0.6, cex_label_category = 0.9) +
   scale_colour_gradient2(low="#67a9cf", high="#ef8a62", midpoint = 0)
 p2 <- enrichplot::cnetplot(
   hallmark.gseaResult[["T4"]],
-  showCategory = my.pathways,
+  showCategory = cnet.pathways,
   node_label="category",
   foldChange = gene.FC,
   cex_label_gene = 0.6, cex_label_category = 0.6) +
