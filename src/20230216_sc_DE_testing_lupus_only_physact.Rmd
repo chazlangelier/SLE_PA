@@ -226,11 +226,6 @@ Save DE results.
 ```{r}
 for (i in c("T4","T8","B","cM")) {
   write.csv(
-    subset(inactive.up[[i]], FDR < 0.1),
-    sprintf("%s/gene_list/%s/%s_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr0.1.csv", wd, subfolder, i)
-  )
-  
-  write.csv(
     inactive.up[[i]],
     sprintf("%s/gene_list/%s/%s_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0.csv", wd, subfolder, i)
   )
@@ -482,7 +477,7 @@ ggsave(
 ```{r}
 inactive.up <- list()
 
-for (i in c("T4","T8","B","cDC","cM","ncM","NK")) { # c("T4","T8","B","cDC","cM","ncM","NK","pDC","Prolif","PB","Progen")
+for (i in c("T4","T8","B","cM")) { # c("T4","T8","B","cDC","cM","ncM","NK","pDC","Prolif","PB","Progen")
   print(paste("DE test:",i))
 
   # Import pseudobulk count
@@ -577,42 +572,54 @@ merged.hallmark.gsea <- rbind(
   hallmark.gsea.res[["T8"]] %>% mutate(cell.type="T8")
 )
 
-# Get list of pathways that are significant in at least one analysis
-my.pathways <- union(
-  hallmark.gsea.res[["T4"]][hallmark.gsea.res[["T4"]]$padj<0.1,]$pathway,
-  hallmark.gsea.res[["T8"]][hallmark.gsea.res[["T8"]]$padj<0.1,]$pathway
-)
-# Filter for these overlapping pathways
+# Filter same pathways as main results (Fig 3B)
 merged.hallmark.gsea <- merged.hallmark.gsea %>%
-  subset(pathway %in% my.pathways)
+  subset(ID %in% my.pathways)
 
-ggplot(data=merged.hallmark.gsea) +
-  geom_point(mapping=aes(x=reorder(gsub("^HALLMARK_","",pathway),NES), y=NES, fill=as.factor(NES>0),
-                         colour=as.factor(p.adjust < 0.1)),
-             pch=21, size=2, stroke=1) +
-  geom_hline(yintercept=0, color="black") +
-  scale_color_manual(values=c("white","black")) +
-  scale_y_continuous(breaks=seq(-4,4,2), limits=c(-3,3)) +
-  labs(x="Hallmark pathways", y="NES", 
-       title="Pathways upregulated in\ninactive patients") +
-  coord_flip() + facet_wrap(~ cell.type) +
+# Reformat pathway names
+merged.hallmark.gsea$ID <- gsub("^HALLMARK_","",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- gsub("_"," ",merged.hallmark.gsea$ID)
+merged.hallmark.gsea$ID <- stringr::str_to_sentence(merged.hallmark.gsea$ID)
+# Fix capitalization of pathway names
+my.dict <- list("Tnfa"="TNFa", "nfkb"="NF-kB", "Il"="IL", "stat"="STAT",
+                "Kras"="KRAS", "Tgf"="TGF", "jak"="JAK", "Mtorc1"="mTORC1",
+                "Pi3k akt mtor"="PI3K AKT mTOR", "Myc"="MYC",
+                "Uv"="UV", "dn"="down", "G2m"="G2M")
+for (i in names(my.dict)) {
+  merged.hallmark.gsea$ID <- gsub(i, my.dict[[i]], merged.hallmark.gsea$ID)
+}
+
+p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(x) x[1]))) +
+  geom_point(aes(color=as.factor(NES>0)),
+             pch=1, size=2, stroke=1) +
+  geom_point(data=. %>% subset(p.adjust<0.1), 
+             aes(color=as.factor(NES>0)),
+             pch=16, size=2, stroke=1) +
+  geom_vline(xintercept=0, color="black") +
+  scale_color_manual(values=c("TRUE"="#ef8a62","FALSE"="#67a9cf")) +
+  scale_x_continuous(limits=c(-3,3), expand=c(0,0)) +
+  labs(x = "GSEA normalized\nenrichment score", y = "",
+       title = "Pathways associated with\nphysical inactivity\n(controlled for physical function)") +
+  facet_wrap(~ cell.type) +
   theme_bw() +
   theme(
     plot.title = element_text(hjust = 0.5, size=12, face="plain"),
-    axis.text = element_text(size=12, color="black"),
+    axis.text = element_text(size=11, color="black"),
     text = element_text(size=12, family="Arial"),
     plot.margin = unit(c(0,1,1,0), "cm"),
     panel.spacing = unit(1, "lines"),
-    legend.key = element_rect(fill = "gray90")
+    legend.key = element_rect(fill = "gray90"),
+    panel.grid.minor=element_blank()
   )
 
 ggsave(
-  paste0(wd,"figures/",subfolder,"/physfunt_GSEA_T4_T8.svg"),
-  width = 10, height=7, units="in"
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_physfunt_T4-T8.svg", wd),
+  plot=p,
+  width=7.2, height=6.8, units="in"
 )
 ```
 
-## Covariates: age, sex, race (patients with steroid info only)
+## Covariates: age, sex, race, steroid
 
 ```{r}
 inactive.up <- list()
@@ -647,7 +654,7 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   # Use edgeR LRT: https://doi.org/10.1038/s41467-021-25960-2
   y <- DGEList(counts = pseudobulk.temp)
   y <- calcNormFactors(y)
-  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race, metadata.temp)
+  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race + as.factor(steroral3mohigh), metadata.temp)
   y <- estimateDisp(y, design)
   fit <- glmFit(y, design)
   lrt <- glmLRT(fit, coef="inactive_t31")
@@ -699,12 +706,7 @@ merged.hallmark.gsea <- rbind(
   hallmark.gsea.res[["T8"]] %>% mutate(cell.type="T8")
 )
 
-# Get list of pathways that are significant in at least one analysis
-my.pathways <- union(
-  hallmark.gsea.res[["T4"]][hallmark.gsea.res[["T4"]]$p.adjust<0.1,]$ID,
-  hallmark.gsea.res[["T8"]][hallmark.gsea.res[["T8"]]$p.adjust<0.1,]$ID
-)
-# Filter for these overlapping pathways
+# Filter same pathways as main results (Fig 3B)
 merged.hallmark.gsea <- merged.hallmark.gsea %>%
   subset(ID %in% my.pathways)
 
@@ -732,7 +734,7 @@ p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(
   scale_color_manual(values=c("TRUE"="#ef8a62","FALSE"="#67a9cf")) +
   scale_x_continuous(limits=c(-3,3), expand=c(0,0)) +
   labs(x = "GSEA normalized\nenrichment score", y = "",
-       title = "Pathways associated with\nphysical inactivity") +
+       title = "Pathways associated with\nphysical inactivity\n(controlled for steroid)") +
   facet_wrap(~ cell.type) +
   theme_bw() +
   theme(
@@ -744,11 +746,17 @@ p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(
     legend.key = element_rect(fill = "gray90"),
     panel.grid.minor=element_blank()
   )
+
+ggsave(
+  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_steroid_T4-T8.svg", wd),
+  plot = p,
+  width = 7.2, height = 6.15, units = "in"
+)
 ```
 
 # IPA
 
-Plot IPA upstream analysis results. I will use the IPA results from 20221208_sc_DE_testing_lupus_only_physact, because the DE analysis is the same as this script.
+Plot IPA upstream analysis results.
 
 ```{r}
 # T4
