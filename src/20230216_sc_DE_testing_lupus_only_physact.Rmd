@@ -472,6 +472,23 @@ ggsave(
 # enrichplot::emapplot(enrichplot::pairwise_termsim(hallmark.gseaResult[["T4"]]))
 ```
 
+```{r}
+# Export source data for the cnetplot
+cnetplot.data <- inactive.up[["T4"]][,c("logFC","FDR")]
+for (i in cnet.pathways) {
+  cnetplot.data[,i] <- ifelse(
+    rownames(cnetplot.data) %in% hallmark.cp$gene_symbol[hallmark.cp$gs_name==i],
+    1, 0
+  )
+}
+
+# Remove genes that are not present in any of the 4 pathways
+cnetplot.data <- cnetplot.data %>%
+  subset(rowSums(cnetplot.data[,cnet.pathways]) > 0)
+
+write.csv(cnetplot.data, "hallmark-gsea_cnetplot_T4_data.csv")
+```
+
 ## Covariates: age, sex, race, physfunt
 
 ```{r}
