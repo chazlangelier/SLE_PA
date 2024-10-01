@@ -1,16 +1,16 @@
 ---
-title: "DE testing 02/16/2023"
+title: "Pseudobulk DE analysis"
 output: html_notebook
 ---
 
 Here I will analyze Jimmie Ye's annotated h5ad object of lupus patients. I will
-analyze the physical activity and stress level of the patients. I will control for age, sex and race.
+analyze the physical activity and stress level of the patients. I will control
+for age, sex and race in all analyses. Some analyses will have additional covariates.
 
 # Import packages
 
 ```{r}
-wd <- "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus"
-subfolder <- "20230216_sc_DE_testing_lupus_only_physact"
+wd <- "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus/SLE_PA"
 
 library(dplyr)
 library(ggplot2)
@@ -18,8 +18,8 @@ library(patchwork)
 
 library(edgeR)
 
-library(SingleCellExperiment)
-library(zellkonverter)
+# library(SingleCellExperiment)
+# library(zellkonverter)
 
 # library(fgsea)
 
@@ -41,10 +41,10 @@ my.theme <- theme_classic() +
 ```{r}
 # Import metadata
 metadata <- read.csv(
-  "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus/metadata/clues_t1_plust2t3PA_N-123_12.7.22.csv"
+  file.path(wd, "data", "metadata.csv")
 )
 
-for (i in c("inactive_t3","biologicalsex","race")) {
+for (i in c("inactive","biologicalsex","race")) {
   metadata[,i] <- as.factor(metadata[,i])
 }
 
@@ -55,21 +55,21 @@ rownames(metadata) <- metadata$subjectid
 
 ```{r}
 # Add updated steroid information
-steroid <- readxl::read_excel(
-  "/Users/hoangvanphan/Library/CloudStorage/Box-Box/Van_research/20220715_CLUES_lupus/metadata/CLUES_steroids_baseline.xlsx"
+steroid <- read.csv(
+  file.path(wd, "data", "steroids.csv")
 )
 steroid$subjectid <- as.character(steroid$subjectid)
 
 # Merge
 metadata <- merge(
-  metadata, steroid[,c("subjectid","steroral3mohigh")],
+  metadata, steroid[,c("subjectid","steroids")],
   by="subjectid", all.x=TRUE, all.y=FALSE
 )
 ```
 
 ```{r}
 # Missing the steroid info
-print(sum(is.na(metadata$steroral3mohigh)))
+print(sum(is.na(metadata$steroids)))
 ```
 
 
@@ -94,17 +94,18 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   print(sprintf("DE test: %s",i))
 
   # Import pseudobulk count
-  pseudobulk <- read.csv(paste0(wd, "/pseudobulk_counts/", 
-                                "Ye_lab_annotated_cellxgene_lupus_only_physact_",i,"_pseudobulk_count.csv"),
-                         row.names = 1, check.names = FALSE)
+  pseudobulk <- read.csv(
+    file.path(wd, "pseudobulk_counts",
+              sprintf("Ye_lab_annotated_cellxgene_lupus_only_physact_%s_pseudobulk_count.csv", i)),
+    row.names = 1, check.names = FALSE)
   
   # Reformat column names
   colnames(pseudobulk) <- sapply(colnames(pseudobulk),
                                  FUN = function(x) strsplit(x,"_")[[1]][1])
   
-  # Get metadata of samples that are present in pseudobulk, and have a valid inactive_t3
+  # Get metadata of samples that are present in pseudobulk, and have a valid inactive
   metadata.temp <- metadata %>%
-    subset(!is.na(inactive_t3) & (subjectid %in% colnames(pseudobulk))) %>%
+    subset(!is.na(inactive) & (subjectid %in% colnames(pseudobulk))) %>%
     droplevels()
   
   # Filter pseudobulk
@@ -116,10 +117,10 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   # Use edgeR LRT: https://doi.org/10.1038/s41467-021-25960-2
   y <- DGEList(counts = pseudobulk.temp)
   y <- calcNormFactors(y)
-  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race, metadata.temp)
+  design <- model.matrix(~ inactive + age + biologicalsex + race, metadata.temp)
   y <- estimateDisp(y, design)
   fit <- glmFit(y, design)
-  lrt <- glmLRT(fit, coef="inactive_t31")
+  lrt <- glmLRT(fit, coef="inactive1")
   
   my.cpm[[i]] <- edgeR::cpm(y, log = TRUE)
 
@@ -162,7 +163,7 @@ ggplot(data = nDE,
   coord_flip() +
   my.theme
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/nDEgenes.svg", wd),
+  file.path(wd, "out", "nDEgenes.svg"),
   width = 3.7, height = 3, units = "in"
 )
 ```
@@ -200,14 +201,9 @@ for (i in c("T4","T8")) {
 }
 
 p[[1]]+p[[2]] + plot_layout(nrow=1)
-# ggsave(
-#   sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/volcano_plot_T4-T8.svg", wd),
-#   plot = p[[1]]+p[[2]] + plot_layout(ncol=1),
-#   width = 3, height = 6, units = "in"
-# )
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/volcano_plot_T4-T8.svg", wd),
-  plot = p[[1]]+p[[2]] + plot_layout(nrow=1),
+  file.path(wd, "out", "volcano_plot_T4-T8.svg"),
+  plot = p[[1]] + p[[2]] + plot_layout(nrow=1),
   width = 6, height = 3.4, units = "in"
 )
 ```
@@ -217,7 +213,7 @@ Check pseudobulk expression to verify the direction of up/down-regulation.
 ```{r}
 print(inactive.up[[i]]["IRF2BP2",])
 boxplot(
-  my.cpm[["T4"]]["IRF2BP2",] ~ metadata[match(colnames(my.cpm[["T4"]]),metadata$subjectid),"inactive_t3"]
+  my.cpm[["T4"]]["IRF2BP2",] ~ metadata[match(colnames(my.cpm[["T4"]]),metadata$subjectid),"inactive"]
 )
 ```
 
@@ -227,59 +223,25 @@ Save DE results.
 for (i in c("T4","T8","B","cM")) {
   write.csv(
     inactive.up[[i]],
-    sprintf("%s/gene_list/%s/%s_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0.csv", wd, subfolder, i)
+    file.path(wd, "out",
+              sprintf("%s_edgeR-LRT_inactive-up_age-biologicalsex-race-covariate_fdr1.0.csv", i)
+    )
   )
 }
 ```
 
 ### GSEA
 
-fgsea
-
-```{r}
-# set.seed(0)
-# hallmark.gsea.res<- list()
-# for (i in c("T4","T8","B","NK","cM")) {
-#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
-#   names(gene.ranks) <- rownames(inactive.up[[i]])
-#   gene.ranks <- sort(gene.ranks)
-#   
-#   # GSEA: GO:BP
-#   hallmark.gsea.res[[i]] <- fgsea(
-#     pathways = hallmark.fgsea,
-#     stats = gene.ranks,
-#     minSize = 15,
-#     maxSize = 500
-#   )
-# }
-```
-
 clusterprofiler
 
 ```{r}
 set.seed(0)
-
-# # Reactome
-# reactome.gsea.res <- list()
-# for (i in c("T4","T8")) {
-#   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
-#   names(gene.ranks) <- rownames(inactive.up[[i]])
-#   gene.ranks <- sort(gene.ranks, decreasing = TRUE)
-#   
-#   temp <- clusterProfiler::GSEA(
-#     geneList = gene.ranks,
-#     TERM2GENE = reactome.cp,
-#     pvalueCutoff = 1, pAdjustMethod = "BH"
-#   )
-#   reactome.gsea.res[[i]] <- temp@result
-# }
 
 # Hallmark
 hallmark.gsea.res <- list() # store data frame
 hallmark.gseaResult <- list() # store gseaResult object
 for (i in c("T4","T8","cM","B")) {
   gene.ranks <- -log10(inactive.up[[i]]$PValue) * sign(inactive.up[[i]]$logFC)
-  # gene.ranks <- inactive.up[[i]]$logFC
   names(gene.ranks) <- rownames(inactive.up[[i]])
   gene.ranks <- sort(gene.ranks, decreasing = TRUE)
   
@@ -297,14 +259,11 @@ Save GSEA results
 
 ```{r}
 for (i in names(hallmark.gsea.res)) {
-  # write.csv(
-  #   reactome.gsea.res[[i]],
-  #   sprintf("%s/gene_list/%s/%s_reactome-GSEA-clusterProfiler_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0.csv", wd, subfolder, i)
-  # )
-
   write.csv(
     hallmark.gsea.res[[i]],
-    sprintf("%s/gene_list/%s/%s_hallmark-GSEA-clusterProfiler_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0.csv", wd, subfolder, i)
+    file.path(wd, "out",
+              sprintf("%s_hallmark-GSEA-clusterProfiler_inactive-up_age-biologicalsex-race-covariate_fdr1.0.csv", i)
+    )
   )
 }
 ```
@@ -364,8 +323,10 @@ p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(
     panel.grid.minor=element_blank()
   )
 
+p
+
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_T4-T8.svg", wd),
+  file.path(wd, "out", "hallmark-gsea_T4-T8.svg"),
   plot = p,
   width = 7.2, height = 6, units = "in"
 )
@@ -379,9 +340,6 @@ merged.hallmark.gsea <- rbind(
   hallmark.gsea.res[["cM"]] %>% mutate(cell.type="cM"), 
   hallmark.gsea.res[["B"]] %>% mutate(cell.type="B")
 )
-# merged.hallmark.gsea$cell.type <- factor(
-#   merged.hallmark.gsea$cell.type,
-#   levels=c("cM","B"))
 
 # Filter for these overlapping pathways
 merged.hallmark.gsea <- merged.hallmark.gsea %>%
@@ -429,7 +387,7 @@ for (i in c("cM","B")) {
 p[[1]]+p[[2]] + plot_layout(nrow=1)
 
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_cM-B.svg", wd),
+  file.path(wd, "out", "hallmark-gsea_cM-B.svg"),
   plot = p[[1]]+p[[2]] + plot_layout(nrow=1),
   width = 9, height = 6.7, units = "in"
 )
@@ -463,7 +421,7 @@ p2 <- enrichplot::cnetplot(
   cex_label_gene = 0.6, cex_label_category = 0.6) +
   scale_colour_gradient2(low="#67a9cf", high="#ef8a62", midpoint = 0)
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_cnetplot_T4.svg", wd),
+  file.path(wd, "out", "hallmark-gsea_cnetplot_T4.svg"),
   plot = p2,
   width = 10, height = 6.5, units = "in"
 )
@@ -486,7 +444,10 @@ for (i in cnet.pathways) {
 cnetplot.data <- cnetplot.data %>%
   subset(rowSums(cnetplot.data[,cnet.pathways]) > 0)
 
-write.csv(cnetplot.data, "hallmark-gsea_cnetplot_T4_data.csv")
+write.csv(
+  cnetplot.data,
+  file.path(wd, "out", "hallmark-gsea_cnetplot_T4_data.csv")
+)
 ```
 
 ## Covariates: age, sex, race, physfunt
@@ -498,17 +459,18 @@ for (i in c("T4","T8","B","cM")) { # c("T4","T8","B","cDC","cM","ncM","NK","pDC"
   print(paste("DE test:",i))
 
   # Import pseudobulk count
-  pseudobulk <- read.csv(paste0(wd, "/pseudobulk_counts/", 
-                                "Ye_lab_annotated_cellxgene_lupus_only_physact_",i,"_pseudobulk_count.csv"),
-                         row.names = 1, check.names = FALSE)
+  pseudobulk <- read.csv(
+    file.path(wd, "pseudobulk_counts",
+              sprintf("Ye_lab_annotated_cellxgene_lupus_only_physact_%s_pseudobulk_count.csv", i)),
+    row.names = 1, check.names = FALSE)
   
   # Reformat column names
   colnames(pseudobulk) <- unlist(lapply(colnames(pseudobulk),
                                         FUN = function(x) strsplit(x,"_")[[1]][1]))
   
-  # Get metadata of samples that are present in pseudobulk, and have a valid inactive_t3
+  # Get metadata of samples that are present in pseudobulk, and have a valid inactive
   metadata.temp <- metadata %>%
-    subset(!is.na(inactive_t3) & (subjectid %in% colnames(pseudobulk))) %>%
+    subset(!is.na(inactive) & (subjectid %in% colnames(pseudobulk))) %>%
     droplevels()
   
   # Filter pseudobulk
@@ -520,10 +482,10 @@ for (i in c("T4","T8","B","cM")) { # c("T4","T8","B","cDC","cM","ncM","NK","pDC"
   # Used edgeR LRT: https://doi.org/10.1038/s41467-021-25960-2
   y <- DGEList(counts = pseudobulk.temp)
   y <- calcNormFactors(y)
-  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race + physfunt, metadata.temp)
+  design <- model.matrix(~ inactive + age + biologicalsex + race + physfunt, metadata.temp)
   y <- estimateDisp(y, design)
   fit <- glmFit(y, design)
-  lrt <- glmLRT(fit, coef="inactive_t31")
+  lrt <- glmLRT(fit, coef="inactive1")
 
   # Cutoff FDR < 0.1
   inactive.up[[i]] <- topTags(lrt, n=Inf, p.value=1, adjust.method="BH")$table
@@ -541,7 +503,8 @@ Save DE results
 for (i in c("T4","T8")) {
   write.csv(
     inactive.up[[i]],
-    sprintf("%s/gene_list/%s/%s_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-physfunt-covariate_fdr1.0.csv", wd, subfolder, i)
+    file.path(wd, "out",
+              sprintf("%s_edgeR-LRT_inactive-up_age-biologicalsex-race-physfunt-covariate_fdr1.0.csv", i))
   )
 }
 ```
@@ -576,7 +539,8 @@ Save GSEA results
 for (i in names(hallmark.gsea.res)) {
   write.csv(
     hallmark.gsea.res[[i]],
-    sprintf("%s/gene_list/%s/%s_hallmark-GSEA-clusterProfiler_inactive-t3-up_age-biologicalsex-race-physfunt-covariate_fdr1.0.csv", wd, subfolder, i)
+    file.path(wd, "out",
+              sprintf("%s_hallmark-GSEA-clusterProfiler_inactive-up_age-biologicalsex-race-physfunt-covariate_fdr1.0.csv", i))
   )
 }
 ```
@@ -630,7 +594,7 @@ p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(
   )
 
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_physfunt_T4-T8.svg", wd),
+  file.path(wd, "out", "hallmark-gsea_physfunt_T4-T8.svg"),
   plot=p,
   width=7.2, height=6.8, units="in"
 )
@@ -656,10 +620,10 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   colnames(pseudobulk) <- sapply(colnames(pseudobulk),
                                  FUN = function(x) strsplit(x,"_")[[1]][1])
   
-  # Get metadata of samples that are present in pseudobulk, and have a valid inactive_t3 and valid steroral3mohigh
+  # Get metadata of samples that are present in pseudobulk, and have a valid inactive and valid steroids
   metadata.temp <- metadata %>%
-    subset(!is.na(inactive_t3) & (subjectid %in% colnames(pseudobulk)) &
-             !is.na(steroral3mohigh)) %>%
+    subset(!is.na(inactive) & (subjectid %in% colnames(pseudobulk)) &
+             !is.na(steroids)) %>%
     droplevels()
   
   # Filter pseudobulk
@@ -671,10 +635,10 @@ for (i in c("T4","T8","B","cDC","cM","ncM","NK","pDC")) { # c("T4","T8","B","cDC
   # Use edgeR LRT: https://doi.org/10.1038/s41467-021-25960-2
   y <- DGEList(counts = pseudobulk.temp)
   y <- calcNormFactors(y)
-  design <- model.matrix(~ inactive_t3 + age + biologicalsex + race + as.factor(steroral3mohigh), metadata.temp)
+  design <- model.matrix(~ inactive + age + biologicalsex + race + as.factor(steroids), metadata.temp)
   y <- estimateDisp(y, design)
   fit <- glmFit(y, design)
-  lrt <- glmLRT(fit, coef="inactive_t31")
+  lrt <- glmLRT(fit, coef="inactive1")
   
   my.cpm[[i]] <- edgeR::cpm(y, log = TRUE)
 
@@ -765,7 +729,7 @@ p <- ggplot(data=merged.hallmark.gsea, aes(x=NES, y=reorder(ID,NES,FUN=function(
   )
 
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/hallmark-gsea_steroid_T4-T8.svg", wd),
+  file.path(wd, "out", "hallmark-gsea_steroid_T4-T8.svg"),
   plot = p,
   width = 7.2, height = 6.15, units = "in"
 )
@@ -778,7 +742,7 @@ Plot IPA upstream analysis results.
 ```{r}
 # T4
 ipa.T4 <- readxl::read_excel(
- "T4_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0_cytokine-z2.0-fdr0.1.xls",
+  file.path(wd, "data", "T4_edgeR-LRT_inactive-up_age-biologicalsex-race-covariate_fdr1.0_cytokine-z2.0-fdr0.1.xls"),
  skip = 1
 )
 # Reformat column names
@@ -804,13 +768,13 @@ ggplot(data = ipa.T4, aes(x=reorder(Upstream.Regulator, Activation.z.score),
     plot.margin = unit(c(0,1,1,0), "cm")
   )
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/T4_IPA-cytokine.svg", wd),
+  file.path(wd, "out", "T4_IPA-cytokine.svg"),
   width = 2.7, height = 4, units = "in"
 )
 
 # T8
 ipa.T8 <- readxl::read_excel(
- "T8_edgeR-LRT_inactive-t3-up_age-biologicalsex-race-covariate_fdr1.0_cytokine-z2.0-fdr0.1.xls",
+  file.path(wd, "data", "T8_edgeR-LRT_inactive-up_age-biologicalsex-race-covariate_fdr1.0_cytokine-z2.0-fdr0.1.xls"),
  skip = 1
 )
 # Reformat column names
@@ -834,7 +798,7 @@ ggplot(data = ipa.T8, aes(x=reorder(Upstream.Regulator, Activation.z.score),
     plot.margin = unit(c(0,1,1,0), "cm")
   )
 ggsave(
-  sprintf("%s/analysis/figures/20230216_sc_DE_testing_lupus_only_physact/T8_IPA-cytokine.svg", wd),
+  file.path(wd, "out", "T8_IPA-cytokine.svg"),
   width = 2.35, height = 1.6, units = "in"
 )
 ```
